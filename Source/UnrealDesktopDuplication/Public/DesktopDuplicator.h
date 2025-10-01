@@ -14,10 +14,12 @@
 
 
 // Forward declarations
+class IDXGIOutput;
 class IDXGIOutputDuplication;
+struct IUnknown;
 
 
-DECLARE_LOG_CATEGORY_EXTERN(DesktopDuplicator, Log, All);
+DECLARE_LOG_CATEGORY_EXTERN(DesktopDuplicatorLog, Log, All);
 
 
 /// <summary>
@@ -45,15 +47,35 @@ public:
     /// </summary>
     virtual ~UDesktopDuplicator(void) noexcept;
 
+    /// <summary>
+    /// Specifies the name of the display to be duplicated.
+    /// </summary>
+    UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Desktop duplication")
+    FString DisplayName;
 
     /// <summary>
-    /// The render target which receives the duplicated output..
+    /// The render target which receives the duplicated output.
     /// </summary>
-    UPROPERTY(BlueprintReadWrite, EditAnywhere)
+    UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Desktop duplication")
     UTextureRenderTarget2D *Target;
+
+    /// <summary>
+    /// Starts duplication the display identified by <see cref="DisplayName"/>.
+    /// </summary>
+    /// <returns></returns>
+    UFUNCTION(BlueprintCallable, Category = "Desktop duplication")
+    bool Start();
 
 private:
 
+    /// <summary>
+    /// Searches the DXGI output for the specified display name.
+    /// </summary>
+    /// <param name="name"></param>
+    /// <returns></returns>
+    static IDXGIOutput *GetOutputForDisplayName(const FString& name) noexcept;
+
+    IUnknown *_device;
     IDXGIOutputDuplication *_duplication;
 
 };

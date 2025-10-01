@@ -17,6 +17,7 @@ public class UnrealDesktopDuplication : ModuleRules {
         this.PrivateDependencyModuleNames.AddRange([
             "CoreUObject",
             "Engine",
+            "RHI",
             "Slate",
             "SlateCore",
         ]);
