@@ -10,12 +10,18 @@
 
 #include "Engine/TextureRenderTarget2D.h"
 
+#include "HAL/ThreadSafeBool.h"
+
 #include "DesktopDuplicator.generated.h"
 
 
 // Forward declarations
-class IDXGIOutput;
+class ID3D11Device;
+class ID3D11Fence;
+class ID3D11Texture2D;
+class IDXGIOutput1;
 class IDXGIOutputDuplication;
+class IDXGIResource;
 struct IUnknown;
 
 
@@ -60,22 +66,75 @@ public:
     UTextureRenderTarget2D *Target;
 
     /// <summary>
+    /// Tries to acquire a new frame to <see cref="Target"/>.
+    /// </summary>
+    /// <param name="timeout">The timeout for the acquisition in
+    /// milliseconds.</param>
+    /// <returns></returns>
+    UFUNCTION(BlueprintCallable, Category = "Desktop duplication")
+    bool Acquire(const int32 timeout) noexcept;
+
+    /// <summary>
     /// Starts duplication the display identified by <see cref="DisplayName"/>.
     /// </summary>
     /// <returns></returns>
     UFUNCTION(BlueprintCallable, Category = "Desktop duplication")
     bool Start();
 
+    /// <summary>
+    /// Releases all resource used for desktop duplication.
+    /// </summary>
+    UFUNCTION(BlueprintCallable, Category = "Desktop duplication")
+    void Stop() noexcept;
+
 private:
+
+    /// <summary>
+    /// Creates a new Direct3D 11 device.
+    /// </summary>
+    /// <returns></returns>
+    static ID3D11Device *CreateDevice(void) noexcept;
 
     /// <summary>
     /// Searches the DXGI output for the specified display name.
     /// </summary>
     /// <param name="name"></param>
     /// <returns></returns>
-    static IDXGIOutput *GetOutputForDisplayName(const FString& name) noexcept;
+    static IDXGIOutput1 *GetOutputForDisplayName(const FString& name) noexcept;
 
-    IUnknown *_device;
+    /// <summary>
+    /// Answer whether the given <paramref name="texture" /> has the given size.
+    /// </summary>
+    /// <param name="texture"></param>
+    /// <param name="width"></param>
+    /// <param name="height"></param>
+    /// <returns></returns>
+    static inline bool HasSize(const UTextureRenderTarget2D *target,
+            const float width, const float height) noexcept {
+        return (target != nullptr)
+            && (target->GetSurfaceWidth() == width)
+            && (target->GetSurfaceHeight() == height);
+    }
+
+    /// <summary>
+    /// Makes sure that <see cref="Target"/> matches the size of the given
+    /// texture.
+    /// </summary>
+    /// <param name="texture"></param>
+    /// <returns></returns>
+    bool MatchTarget(ID3D11Texture2D *texture) noexcept;
+
+    /// <summary>
+    /// Stages the given resource for copying to the <see cref="Target"/> and
+    /// releases the resource.
+    /// </summary>
+    /// <param name="resource"></param>
+    /// <returns><see langword="true" /> if the resource has been staged. If
+    /// <see langword="false" /> is returned, it has been dropped.</returns>
+    bool Stage(IDXGIResource *resource) noexcept;
+
+    FThreadSafeBool _busy;
+    ID3D11Device *_device;
     IDXGIOutputDuplication *_duplication;
-
+    ID3D11Fence *_fence;
 };
