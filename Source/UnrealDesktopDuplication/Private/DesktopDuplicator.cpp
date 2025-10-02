@@ -39,7 +39,8 @@ DEFINE_LOG_CATEGORY(DesktopDuplicatorLog);
 UDesktopDuplicator::UDesktopDuplicator(void)
     : _device(nullptr),
     _duplication(nullptr),
-    _fence(nullptr) { }
+    _fence(nullptr),
+    _stagingTexture(nullptr) { }
 
 
 /*
@@ -49,7 +50,8 @@ UDesktopDuplicator::UDesktopDuplicator(const FObjectInitializer& initialiser)
     : Super(initialiser),
     _device(nullptr),
     _duplication(nullptr),
-    _fence(nullptr) { }
+    _fence(nullptr),
+    _stagingTexture(nullptr) { }
 
 
 /*
@@ -234,12 +236,19 @@ void UDesktopDuplicator::Stop(void) noexcept {
 
     if (this->_device != nullptr) {
         this->_device->Release();
+        this->_device = nullptr;
     }
     if (this->_duplication != nullptr) {
         this->_duplication->Release();
+        this->_duplication = nullptr;
     }
     if (this->_fence != nullptr) {
         this->_fence->Release();
+        this->_fence = nullptr;
+    }
+    if (this->_stagingTexture != nullptr) {
+        this->_stagingTexture->Release();
+        this->_stagingTexture = nullptr;
     }
 }
 
@@ -364,6 +373,21 @@ IDXGIOutput1 *UDesktopDuplicator::GetOutputForDisplayName(
 
 
 /*
+ * UDesktopDuplicator::HasSize
+ */
+bool UDesktopDuplicator::HasSize(ID3D11Texture2D *texture,
+        const uint32 width, const uint32 height) noexcept {
+    if (texture == nullptr) {
+        return false;
+    }
+
+    D3D11_TEXTURE2D_DESC desc;
+    texture->GetDesc(&desc);
+    return ((desc.Width == width) && (desc.Height == height));
+}
+
+
+/*
  * UDesktopDuplicator::MatchTarget
  */
 bool UDesktopDuplicator::MatchTarget(ID3D11Texture2D *texture) noexcept {
@@ -454,6 +478,28 @@ bool UDesktopDuplicator::Stage(IDXGIResource *resource) noexcept {
         // If the duplicator does have its own device, it means that the
         // duplication cannot use the same device as the game. Therefore, we
         // need to transfer the data manually via system memory.
+
+
+        if (this->_stagingTexture != nullptr) {
+            D3D11_TEXTURE2D_DESC desc;
+            texture->GetDesc(&desc);
+            desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+            desc.Usage = D3D11_USAGE_STAGING;
+            desc.BindFlags = 0;
+            desc.MiscFlags = 0;
+            auto hr = this->_device->CreateTexture2D(&desc, nullptr,
+                &this->_stagingTexture);
+            if (FAILED(hr)) {
+                UE_LOG(DesktopDuplicatorLog,
+                    Error,
+                    TEXT("Creating a staging texture for desktop duplication ")
+                    TEXT("failed with error 0x%x."), hr);
+                assert(this->_stagingTexture == nullptr);
+                texture->Release();
+                this->_busy.AtomicSet(false);
+                return false;
+            }
+        }
 
         // TODO
         texture->Release();

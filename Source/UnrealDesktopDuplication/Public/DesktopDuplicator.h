@@ -117,6 +117,16 @@ private:
     }
 
     /// <summary>
+    /// Answer whether the given <paramref name="texture" /> has the given size.
+    /// </summary>
+    /// <param name="texture"></param>
+    /// <param name="width"></param>
+    /// <param name="height"></param>
+    /// <returns></returns>
+    static bool HasSize(ID3D11Texture2D *texture,
+        const uint32 width, const uint32 height) noexcept;
+
+    /// <summary>
     /// Makes sure that <see cref="Target"/> matches the size of the given
     /// texture.
     /// </summary>
@@ -137,4 +147,5 @@ private:
     ID3D11Device *_device;
     IDXGIOutputDuplication *_duplication;
     ID3D11Fence *_fence;
+    ID3D11Texture2D *_stagingTexture;
 };
