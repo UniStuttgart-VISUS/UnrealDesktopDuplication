@@ -2,6 +2,8 @@
 
 Exposes a desktop captured by the [Desktop Duplication API](https://learn.microsoft.com/en-us/windows/win32/direct3ddxgi/desktop-dup-api) as an Unreal texture.
 
+![](./Docs/sample.png)
+
 ## Prerequisites
 * Platform: Win64
 * Unreal Engine 5.6+
