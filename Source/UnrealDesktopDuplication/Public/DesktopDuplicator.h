@@ -117,14 +117,14 @@ private:
     }
 
     /// <summary>
-    /// Answer whether the given <paramref name="texture" /> has the given size.
+    /// Answer whether the given <paramref name="target" /> texture has the same
+    /// size as the given <paramref name="reference" /> texture.
     /// </summary>
-    /// <param name="texture"></param>
-    /// <param name="width"></param>
-    /// <param name="height"></param>
+    /// <param name="target"></param>
+    /// <param name="reference"></param>
     /// <returns></returns>
-    static bool HasSize(ID3D11Texture2D *texture,
-        const uint32 width, const uint32 height) noexcept;
+    static bool HasSize(ID3D11Texture2D *target,
+        ID3D11Texture2D *reference) noexcept;
 
     /// <summary>
     /// Makes sure that <see cref="Target"/> matches the size of the given

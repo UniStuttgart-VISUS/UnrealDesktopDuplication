@@ -85,7 +85,7 @@ bool UDesktopDuplicator::Acquire(const int32 timeout) noexcept {
 
     if (this->_busy.AtomicSet(true)) {
         UE_LOG(DesktopDuplicatorLog,
-            Verbose,
+            Display,
             TEXT("Previous duplication frame is still being processed."));
         return false;
     }
@@ -113,6 +113,7 @@ bool UDesktopDuplicator::Acquire(const int32 timeout) noexcept {
             UE_LOG(DesktopDuplicatorLog,
                 Verbose,
                 TEXT("No frame available within %d ms."), timeout);
+            this->_busy.AtomicSet(false);
             return false;
 
         case DXGI_ERROR_ACCESS_LOST:
@@ -122,6 +123,7 @@ bool UDesktopDuplicator::Acquire(const int32 timeout) noexcept {
                 TEXT("the duplicator."));
             this->Stop();
             this->Start();
+            this->_busy.AtomicSet(false);
             return false;
 
         case S_OK:
@@ -132,6 +134,7 @@ bool UDesktopDuplicator::Acquire(const int32 timeout) noexcept {
                 Error,
                 TEXT("Acquiring next frame failed with unexpected error 0x%x."),
                 hr);
+            this->_busy.AtomicSet(false);
             return false;
     }
 }
@@ -151,6 +154,10 @@ bool UDesktopDuplicator::Start(void) {
     }
 
     if (this->_device != nullptr) {
+        UE_LOG(DesktopDuplicatorLog,
+            Display,
+            TEXT("The desktop duplicator is releasing it previously used ")
+            TEXT("Direct3D device."));
         this->_device->Release();
         this->_device = nullptr;
     }
@@ -173,7 +180,7 @@ bool UDesktopDuplicator::Start(void) {
             Warning,
             TEXT("The game does not seem to use Direct3D 11. The desktop ")
             TEXT("duplicator will create its own device and move the data ")
-            TEXT("via system RAM."));
+            TEXT("via system memory."));
         assert(this->_device == nullptr);
         this->_device = this->CreateDevice();
         assert(this->_device != nullptr);
@@ -375,15 +382,22 @@ IDXGIOutput1 *UDesktopDuplicator::GetOutputForDisplayName(
 /*
  * UDesktopDuplicator::HasSize
  */
-bool UDesktopDuplicator::HasSize(ID3D11Texture2D *texture,
-        const uint32 width, const uint32 height) noexcept {
-    if (texture == nullptr) {
+bool UDesktopDuplicator::HasSize(ID3D11Texture2D *target,
+        ID3D11Texture2D *reference) noexcept {
+    assert(reference != nullptr);
+    if (target == nullptr) {
         return false;
     }
 
-    D3D11_TEXTURE2D_DESC desc;
-    texture->GetDesc(&desc);
-    return ((desc.Width == width) && (desc.Height == height));
+    D3D11_TEXTURE2D_DESC tgtDesc;
+    target->GetDesc(&tgtDesc);
+
+    D3D11_TEXTURE2D_DESC refDesc;
+    reference->GetDesc(&refDesc);
+
+    return (tgtDesc.Width == refDesc.Width)
+        && (tgtDesc.Height == refDesc.Height)
+        && (tgtDesc.Format == refDesc.Format);
 }
 
 
@@ -418,13 +432,15 @@ bool UDesktopDuplicator::MatchTarget(ID3D11Texture2D *texture) noexcept {
 bool UDesktopDuplicator::Stage(IDXGIResource *resource) noexcept {
     assert(resource != nullptr);
     assert(this->_busy);
+    auto retval = true;
     ID3D11Texture2D *texture = nullptr;
 
-    {
+    if (retval) {
         auto hr = resource->QueryInterface(&texture);
 
         // The contract of the method is that it release the 'resource' whatever
-        // happens. Therefore, we release it before we potentially fail.
+        // happens. Therefore, we release it right now as we never need it
+        // again, regardless of whether we got its texture interface or not.
         resource->Release();
 
         if (FAILED(hr)) {
@@ -432,20 +448,19 @@ bool UDesktopDuplicator::Stage(IDXGIResource *resource) noexcept {
                 Error,
                 TEXT("The given DXGI resource is not a Direct3D 11 texture."));
             assert(texture == nullptr);
-            return false;
+            retval = false;
         }
     }
 
-    if (!this->MatchTarget(texture)) {
+    if (retval && !this->MatchTarget(texture)) {
         UE_LOG(DesktopDuplicatorLog,
             Display,
             TEXT("Dropping desktop duplication as the target needs to be ")
             TEXT("resized."));
-        texture->Release();
-        return false;
+        retval = false;
     }
 
-    if (this->_fence == nullptr) {
+    if (retval && (this->_fence == nullptr)) {
         // The duplicator shares the device with the game, so we can perform a
         // texture copy directly on the GPU.
         assert(::IsRHID3D11());
@@ -474,13 +489,21 @@ bool UDesktopDuplicator::Stage(IDXGIResource *resource) noexcept {
                 this->_busy.AtomicSet(false);
             });
 
-    } else {
+        // At this point, the lambda "owns" the texture.
+        texture = nullptr;
+
+    } else if (retval) {
         // If the duplicator does have its own device, it means that the
         // duplication cannot use the same device as the game. Therefore, we
         // need to transfer the data manually via system memory.
+        if (!HasSize(this->_stagingTexture, texture)) {
+            if (this->_stagingTexture != nullptr) {
+                this->_stagingTexture->Release();
+            }
+            this->_stagingTexture = nullptr;
+        }
 
-
-        if (this->_stagingTexture != nullptr) {
+        if (this->_stagingTexture == nullptr) {
             D3D11_TEXTURE2D_DESC desc;
             texture->GetDesc(&desc);
             desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
@@ -495,15 +518,20 @@ bool UDesktopDuplicator::Stage(IDXGIResource *resource) noexcept {
                     TEXT("Creating a staging texture for desktop duplication ")
                     TEXT("failed with error 0x%x."), hr);
                 assert(this->_stagingTexture == nullptr);
-                texture->Release();
-                this->_busy.AtomicSet(false);
-                return false;
+                retval = false;
             }
         }
 
         // TODO
+    }
+
+    if (!retval) {
+        this->_busy.AtomicSet(false);
+    }
+
+    if (texture != nullptr) {
         texture->Release();
     }
 
-    return true;
+    return retval;
 }
