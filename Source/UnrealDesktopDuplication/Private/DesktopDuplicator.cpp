@@ -37,7 +37,9 @@ DEFINE_LOG_CATEGORY(DesktopDuplicatorLog);
  * UDesktopDuplicator::UDesktopDuplicator
  */
 UDesktopDuplicator::UDesktopDuplicator(void)
-    : _device(nullptr),
+    : AllowGpuCopy(false),
+    _context(nullptr),
+    _device(nullptr),
     _duplication(nullptr),
     _fence(nullptr),
     _stagingTexture(nullptr) { }
@@ -48,6 +50,7 @@ UDesktopDuplicator::UDesktopDuplicator(void)
  */
 UDesktopDuplicator::UDesktopDuplicator(const FObjectInitializer& initialiser)
     : Super(initialiser),
+    _context(nullptr),
     _device(nullptr),
     _duplication(nullptr),
     _fence(nullptr),
@@ -94,13 +97,17 @@ bool UDesktopDuplicator::Acquire(const int32 timeout) noexcept {
     IDXGIResource *resource = nullptr;
 
     {
+        UE_LOG(DesktopDuplicatorLog,
+            Display,
+            TEXT("Releasing previously acquired desktop."));
         auto hr = this->_duplication->ReleaseFrame();
         if (FAILED(hr)) {
             UE_LOG(DesktopDuplicatorLog,
                 Warning,
                 TEXT("Releasing the previous desktop duplication frame ")
                 TEXT("failed with error 0x%x. Error 0x%x is expected for the ")
-                TEXT("first frame."), hr, DXGI_ERROR_INVALID_CALL);
+                TEXT("first frame and if the previous acquisition timed out."),
+                hr, DXGI_ERROR_INVALID_CALL);
         }
     }
 
@@ -111,7 +118,7 @@ bool UDesktopDuplicator::Acquire(const int32 timeout) noexcept {
     switch (hr) {
         case DXGI_ERROR_WAIT_TIMEOUT:
             UE_LOG(DesktopDuplicatorLog,
-                Verbose,
+                Display,
                 TEXT("No frame available within %d ms."), timeout);
             this->_busy.AtomicSet(false);
             return false;
@@ -167,8 +174,8 @@ bool UDesktopDuplicator::Start(void) {
         return false;
     }
 
-    if (::IsRHID3D11()) {
-        auto rhi = static_cast<ID3D11DynamicRHI *>(GDynamicRHI);
+    if (this->AllowGpuCopy && ::IsRHID3D11()) {
+        auto rhi = ::GetID3D11DynamicRHI();
         assert(this->_device == nullptr);
         this->_device = rhi->RHIGetDevice();
         assert(this->_device != nullptr);
@@ -184,6 +191,9 @@ bool UDesktopDuplicator::Start(void) {
         assert(this->_device == nullptr);
         this->_device = this->CreateDevice();
         assert(this->_device != nullptr);
+
+        this->_device->GetImmediateContext(&this->_context);
+        assert(this->_context != nullptr);
 
         ID3D11Device5 *device5 = nullptr;
         ON_SCOPE_EXIT{ if (device5 != nullptr) { device5->Release(); } };
@@ -241,6 +251,10 @@ bool UDesktopDuplicator::Start(void) {
 void UDesktopDuplicator::Stop(void) noexcept {
     assert(IsInGameThread());
 
+    if (this->_context != nullptr) {
+        this->_context->Release();
+        this->_context = nullptr;
+    }
     if (this->_device != nullptr) {
         this->_device->Release();
         this->_device = nullptr;
@@ -412,7 +426,10 @@ bool UDesktopDuplicator::MatchTarget(ID3D11Texture2D *texture) noexcept {
 
     const auto retval = HasSize(this->Target, desc.Width, desc.Height);
 
-    if (!retval) {
+    if (!retval && (this->Target != nullptr)) {
+        UE_LOG(DesktopDuplicatorLog,
+            Display,
+            TEXT("Resizing desktop duplication target."));
         this->Target->InitCustomFormat(desc.Width,
             desc.Height,
             EPixelFormat::PF_B8G8R8A8,
@@ -446,7 +463,9 @@ bool UDesktopDuplicator::Stage(IDXGIResource *resource) noexcept {
         if (FAILED(hr)) {
             UE_LOG(DesktopDuplicatorLog,
                 Error,
-                TEXT("The given DXGI resource is not a Direct3D 11 texture."));
+                TEXT("The given DXGI resource is not a Direct3D 11 texture. ")
+                TEXT("This should never happen as desktop duplication is ")
+                TEXT("currently based on Direct3D 11."));
             assert(texture == nullptr);
             retval = false;
         }
@@ -485,6 +504,7 @@ bool UDesktopDuplicator::Stage(IDXGIResource *resource) noexcept {
                 //cmdList.EndRenderPass();
 
                 src.SafeRelease();
+//                this->_duplication->ReleaseFrame();
                 texture->Release();
                 this->_busy.AtomicSet(false);
             });
@@ -496,6 +516,8 @@ bool UDesktopDuplicator::Stage(IDXGIResource *resource) noexcept {
         // If the duplicator does have its own device, it means that the
         // duplication cannot use the same device as the game. Therefore, we
         // need to transfer the data manually via system memory.
+        assert(this->_context != nullptr);
+
         if (!HasSize(this->_stagingTexture, texture)) {
             if (this->_stagingTexture != nullptr) {
                 this->_stagingTexture->Release();
@@ -522,10 +544,45 @@ bool UDesktopDuplicator::Stage(IDXGIResource *resource) noexcept {
             }
         }
 
-        // TODO
+        this->_context->CopyResource(this->_stagingTexture, texture);
+
+        ENQUEUE_RENDER_COMMAND(UpdateRTCommand)(
+            [this, texture](FRHICommandListImmediate& cmdList) {
+                D3D11_MAPPED_SUBRESOURCE data { };
+                auto hr = this->_context->Map(this->_stagingTexture,
+                    0, D3D11_MAP_READ, 0, &data);
+                if (FAILED(hr)) {
+                    UE_LOG(DesktopDuplicatorLog,
+                        Error,
+                        TEXT("Mapping the staging texture for desktop ")
+                        TEXT("duplication failed with error 0x%x."), hr);
+                    return;
+                }
+
+                FUpdateTextureRegion2D region(0, 0, 0, 0,
+                    this->Target->GetSurfaceWidth(),
+                    this->Target->GetSurfaceHeight());
+
+                auto res = this->Target->GetRenderTargetResource();
+                GDynamicRHI->RHIUpdateTexture2D(
+                    cmdList,
+                    res->GetRenderTargetTexture(),
+                    0,
+                    region,
+                    data.RowPitch,
+                    static_cast<const uint8 *>(data.pData));
+
+                this->_context->Unmap(this->_stagingTexture, 0);
+                this->_busy.AtomicSet(false);
+            });
     }
 
     if (!retval) {
+        UE_LOG(DesktopDuplicatorLog,
+            Warning,
+            TEXT("Cleaning up resources of failed staging attempt of ")
+            TEXT("duplicated desktop."));
+//        this->_duplication->ReleaseFrame();
         this->_busy.AtomicSet(false);
     }
 

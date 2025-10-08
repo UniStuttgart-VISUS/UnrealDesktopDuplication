@@ -17,6 +17,7 @@
 
 // Forward declarations
 class ID3D11Device;
+class ID3D11DeviceContext;
 class ID3D11Fence;
 class ID3D11Texture2D;
 class IDXGIOutput1;
@@ -52,6 +53,12 @@ public:
     /// Finalises the instance.
     /// </summary>
     virtual ~UDesktopDuplicator(void) noexcept;
+
+    /// <summary>
+    /// Allows for copying the duplicated frames without involving the CPU.
+    /// </summary>
+    UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Desktop duplication")
+    bool AllowGpuCopy;
 
     /// <summary>
     /// Specifies the name of the display to be duplicated.
@@ -144,6 +151,7 @@ private:
     bool Stage(IDXGIResource *resource) noexcept;
 
     FThreadSafeBool _busy;
+    ID3D11DeviceContext *_context;
     ID3D11Device *_device;
     IDXGIOutputDuplication *_duplication;
     ID3D11Fence *_fence;
