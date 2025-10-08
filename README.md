@@ -11,7 +11,7 @@ Exposes a desktop captured by the [Desktop Duplication API](https://learn.micros
  
 ## Usage
 * Clone the repository into the "Plugins" directory of your project.
-* Restart Unreal Engine and check the plugin list for "UnrealDesktopDuplication".
+* Restart Unreal Engine and check the plugin list for "Desktop Duplication for Unreal Engine 5".
 * The [`UDesktopDuplicator`](Source/UnrealDesktopDuplication/Public/DesktopDuplicator.h) is the core class implementing all the stuff.
 * The `BP_DesktopDuplicationActor` in the plugin's content shows how to put everything together. It uses the `RT_DesktopDuplication` render target next to it as its destination.
 * You can create additional instances with different render targets to duplicate multiple screens. Use the `Target` property of the blueprint to set the display name you want to see, for instance "\\.\DISPLAY0". If no display is configured, the first one found will be used.
