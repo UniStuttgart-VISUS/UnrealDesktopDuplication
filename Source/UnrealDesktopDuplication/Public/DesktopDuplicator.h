@@ -124,14 +124,12 @@ private:
     }
 
     /// <summary>
-    /// Answer whether the given <paramref name="target" /> texture has the same
-    /// size as the given <paramref name="reference" /> texture.
+    /// Makes sure that the <see cref="_stagingTexture"/> and the
+    /// <see cref="_stagingProjection"/> match the size of the given texture.
     /// </summary>
-    /// <param name="target"></param>
-    /// <param name="reference"></param>
+    /// <param name="texture"></param>
     /// <returns></returns>
-    static bool HasSize(ID3D11Texture2D *target,
-        ID3D11Texture2D *reference) noexcept;
+    bool MatchStaging(ID3D11Texture2D *texture) noexcept;
 
     /// <summary>
     /// Makes sure that <see cref="Target"/> matches the size of the given
@@ -155,5 +153,6 @@ private:
     ID3D11Device *_device;
     IDXGIOutputDuplication *_duplication;
     ID3D11Fence *_fence;
+    IUnknown *_stagingProjection;
     ID3D11Texture2D *_stagingTexture;
 };

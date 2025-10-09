@@ -42,6 +42,7 @@ UDesktopDuplicator::UDesktopDuplicator(void)
     _device(nullptr),
     _duplication(nullptr),
     _fence(nullptr),
+    _stagingProjection(nullptr),
     _stagingTexture(nullptr) { }
 
 
@@ -54,6 +55,7 @@ UDesktopDuplicator::UDesktopDuplicator(const FObjectInitializer& initialiser)
     _device(nullptr),
     _duplication(nullptr),
     _fence(nullptr),
+    _stagingProjection(nullptr),
     _stagingTexture(nullptr) { }
 
 
@@ -160,75 +162,57 @@ bool UDesktopDuplicator::Start(void) {
         return false;
     }
 
-    if (this->_device != nullptr) {
-        UE_LOG(DesktopDuplicatorLog,
-            Display,
-            TEXT("The desktop duplicator is releasing it previously used ")
-            TEXT("Direct3D device."));
-        this->_device->Release();
-        this->_device = nullptr;
-    }
-
     auto output = this->GetOutputForDisplayName(this->DisplayName);
     if (output == nullptr) {
         return false;
     }
 
-    if (this->AllowGpuCopy && ::IsRHID3D11()) {
-        auto rhi = ::GetID3D11DynamicRHI();
-        assert(this->_device == nullptr);
-        this->_device = rhi->RHIGetDevice();
-        assert(this->_device != nullptr);
-        this->_device->AddRef();
-        assert(this->_fence == nullptr);
+    // Create the device that is used for duplication. In theory, we should be
+    // able to use the one created by Unreal Engine if the RHI is D3D11, but
+    // this is extremely unstable.
+    assert(this->_device == nullptr);
+    this->_device = this->CreateDevice();
+    assert(this->_device != nullptr);
 
-    } else {
-        UE_LOG(DesktopDuplicatorLog,
-            Warning,
-            TEXT("The game does not seem to use Direct3D 11. The desktop ")
-            TEXT("duplicator will create its own device and move the data ")
-            TEXT("via system memory."));
-        assert(this->_device == nullptr);
-        this->_device = this->CreateDevice();
-        assert(this->_device != nullptr);
-
+    if (this->_device != nullptr) {
+        assert(this->_context == nullptr);
         this->_device->GetImmediateContext(&this->_context);
         assert(this->_context != nullptr);
+    }
 
-        ID3D11Device5 *device5 = nullptr;
-        ON_SCOPE_EXIT{ if (device5 != nullptr) { device5->Release(); } };
+    //ID3D11Device5 *device5 = nullptr;
+    //ON_SCOPE_EXIT{ if (device5 != nullptr) { device5->Release(); } };
 
-        {
-            auto hr = this->_device->QueryInterface(::IID_ID3D11Device5,
-                reinterpret_cast<void **>(&device5));
-            if (FAILED(hr)) {
-                UE_LOG(DesktopDuplicatorLog,
-                    Error,
-                    TEXT("Failed to obtain a ID3D11Device5, which is ")
-                    TEXT("required for creating a fence: 0x%x"), hr);
-                assert(device5 == nullptr);
-                this->_device->Release();
-                this->_device = nullptr;
-            }
-        }
+    //{
+    //    auto hr = this->_device->QueryInterface(::IID_ID3D11Device5,
+    //        reinterpret_cast<void **>(&device5));
+    //    if (FAILED(hr)) {
+    //        UE_LOG(DesktopDuplicatorLog,
+    //            Error,
+    //            TEXT("Failed to obtain a ID3D11Device5, which is ")
+    //            TEXT("required for creating a fence: 0x%x"), hr);
+    //        assert(device5 == nullptr);
+    //        this->_device->Release();
+    //        this->_device = nullptr;
+    //    }
+    //}
 
-        if (device5 != nullptr) {
-            auto hr = device5->CreateFence(0,
-                D3D11_FENCE_FLAG_NONE,
-                ::IID_ID3D11Fence,
-                reinterpret_cast<void **>(&this->_fence));
-            if (FAILED(hr)) {
-                UE_LOG(DesktopDuplicatorLog,
-                    Error,
-                    TEXT("Creating a fence for synchronisation of ")
-                    TEXT("desktop duplication failed with error 0x%x."),
-                    hr);
-                assert(this->_fence == nullptr);
-                this->_device->Release();
-                this->_device = nullptr;
-            }
-        } /* if (device5 != nullptr) */
-    } /* if (::IsRHID3D11()) */
+    //if (device5 != nullptr) {
+    //    auto hr = device5->CreateFence(0,
+    //        D3D11_FENCE_FLAG_NONE,
+    //        ::IID_ID3D11Fence,
+    //        reinterpret_cast<void **>(&this->_fence));
+    //    if (FAILED(hr)) {
+    //        UE_LOG(DesktopDuplicatorLog,
+    //            Error,
+    //            TEXT("Creating a fence for synchronisation of ")
+    //            TEXT("desktop duplication failed with error 0x%x."),
+    //            hr);
+    //        assert(this->_fence == nullptr);
+    //        this->_device->Release();
+    //        this->_device = nullptr;
+    //    }
+    //} /* if (device5 != nullptr) */
 
     if (this->_device != nullptr) {
         auto hr = output->DuplicateOutput(this->_device, &this->_duplication);
@@ -266,6 +250,10 @@ void UDesktopDuplicator::Stop(void) noexcept {
     if (this->_fence != nullptr) {
         this->_fence->Release();
         this->_fence = nullptr;
+    }
+    if (this->_stagingProjection != nullptr) {
+        this->_stagingProjection->Release();
+        this->_stagingProjection = nullptr;
     }
     if (this->_stagingTexture != nullptr) {
         this->_stagingTexture->Release();
@@ -394,24 +382,89 @@ IDXGIOutput1 *UDesktopDuplicator::GetOutputForDisplayName(
 
 
 /*
- * UDesktopDuplicator::HasSize
+ * UDesktopDuplicator::MatchStaging
  */
-bool UDesktopDuplicator::HasSize(ID3D11Texture2D *target,
-        ID3D11Texture2D *reference) noexcept {
-    assert(reference != nullptr);
-    if (target == nullptr) {
+bool UDesktopDuplicator::MatchStaging(ID3D11Texture2D *texture) noexcept {
+    if (texture == nullptr) {
         return false;
     }
 
-    D3D11_TEXTURE2D_DESC tgtDesc;
-    target->GetDesc(&tgtDesc);
+    D3D11_TEXTURE2D_DESC desc;
+    texture->GetDesc(&desc);
 
-    D3D11_TEXTURE2D_DESC refDesc;
-    reference->GetDesc(&refDesc);
+    D3D11_TEXTURE2D_DESC curDesc;
+    if (this->_stagingTexture != nullptr) {
+        this->_stagingTexture->GetDesc(&curDesc);
 
-    return (tgtDesc.Width == refDesc.Width)
-        && (tgtDesc.Height == refDesc.Height)
-        && (tgtDesc.Format == refDesc.Format);
+        const auto match
+            = (curDesc.Width == desc.Width)
+            && (curDesc.Height == desc.Height)
+            && (curDesc.Format == desc.Format);
+
+        if (!match) {
+            UE_LOG(DesktopDuplicatorLog,
+                Display,
+                TEXT("Releasing mismatched staging texture."));
+            this->_stagingTexture->Release();
+            this->_stagingTexture = nullptr;
+
+            if (this->_stagingProjection != nullptr) {
+                this->_stagingProjection->Release();
+                this->_stagingProjection = nullptr;
+            }
+        }
+    } /* if (this->_stagingTexture != nullptr) */
+
+    if (this->_stagingTexture == nullptr) {
+        const auto gpuCopy = this->AllowGpuCopy && (::IsRHID3D11());
+        desc.CPUAccessFlags = gpuCopy ? 0 : D3D11_CPU_ACCESS_READ;
+        desc.Usage = gpuCopy ? D3D11_USAGE_DEFAULT : D3D11_USAGE_STAGING;
+        desc.BindFlags = 0;
+        desc.MiscFlags = gpuCopy ? D3D11_RESOURCE_MISC_SHARED : 0;
+        auto hr = this->_device->CreateTexture2D(&desc, nullptr,
+            &this->_stagingTexture);
+        if (FAILED(hr)) {
+            UE_LOG(DesktopDuplicatorLog,
+                Error,
+                TEXT("Creating a staging texture for desktop duplication ")
+                TEXT("failed with error 0x%x."), hr);
+            assert(this->_stagingTexture == nullptr);
+        }
+    }
+
+    if (this->AllowGpuCopy
+            && (this->_stagingTexture != nullptr)
+            && (this->_stagingProjection == nullptr)) {
+        if (::IsRHID3D11()) {
+            HANDLE handle = NULL;
+            IDXGIResource *resource = nullptr;
+
+            auto hr = this->_stagingTexture->QueryInterface(&resource);
+            if (SUCCEEDED(hr)) {
+                hr = resource->GetSharedHandle(&handle);
+                resource->Release();
+            }
+
+            if (SUCCEEDED(hr)) {
+                const auto rhi = ::GetID3D11DynamicRHI();
+                assert(this->_stagingProjection == nullptr);
+                hr = rhi->RHIGetDevice()->OpenSharedResource(
+                    handle,
+                    ::IID_ID3D11Texture2D,
+                    reinterpret_cast<void **>(&this->_stagingProjection));
+            }
+
+            if (FAILED(hr)) {
+                UE_LOG(DesktopDuplicatorLog,
+                    Warning,
+                    TEXT("Opening the desktop duplication staging texture on ")
+                    TEXT("the engine's device failed with error 0x%x."), hr);
+                assert(this->_stagingProjection == nullptr);
+            }
+        }
+    } /* if (this->AllowGpuCopy ... */
+
+    return (this->_stagingTexture != nullptr);
 }
 
 
@@ -471,6 +524,14 @@ bool UDesktopDuplicator::Stage(IDXGIResource *resource) noexcept {
         }
     }
 
+    if (retval && !this->MatchStaging(texture)) {
+        UE_LOG(DesktopDuplicatorLog,
+            Error,
+            TEXT("Failed to match the staging texture for desktop ")
+            TEXT("duplication."));
+        retval = false;
+    }
+
     if (retval && !this->MatchTarget(texture)) {
         UE_LOG(DesktopDuplicatorLog,
             Display,
@@ -479,103 +540,79 @@ bool UDesktopDuplicator::Stage(IDXGIResource *resource) noexcept {
         retval = false;
     }
 
-    if (retval && (this->_fence == nullptr)) {
-        // The duplicator shares the device with the game, so we can perform a
-        // texture copy directly on the GPU.
-        assert(::IsRHID3D11());
-
-        ENQUEUE_RENDER_COMMAND(CopyRTCommand)(
-            [this, texture](FRHICommandListImmediate& cmdList) {
-                assert(texture != nullptr);
-                auto rhi = ::GetID3D11DynamicRHI();
-                auto src = rhi->RHICreateTexture2DFromResource(
-                    EPixelFormat::PF_B8G8R8A8,
-                    ETextureCreateFlags::None,
-                    FClearValueBinding::None,
-                    texture);
-                src->SetName(TEXT("Desktop source"));
-                auto dst = this->Target
-                    ->GetRenderTargetResource()
-                    ->GetRenderTargetTexture();
-
-                FRHIRenderPassInfo rpi(dst, ERenderTargetActions::Load_Store);
-                //cmdList.BeginRenderPass(rpi, TEXT("CopyRT"));
-                cmdList.CopyTexture(src, dst, FRHICopyTextureInfo());
-                //cmdList.EndRenderPass();
-
-                src.SafeRelease();
-//                this->_duplication->ReleaseFrame();
-                texture->Release();
-                this->_busy.AtomicSet(false);
-            });
-
-        // At this point, the lambda "owns" the texture.
-        texture = nullptr;
-
-    } else if (retval) {
-        // If the duplicator does have its own device, it means that the
-        // duplication cannot use the same device as the game. Therefore, we
-        // need to transfer the data manually via system memory.
+    if (retval) {
         assert(this->_context != nullptr);
-
-        if (!HasSize(this->_stagingTexture, texture)) {
-            if (this->_stagingTexture != nullptr) {
-                this->_stagingTexture->Release();
-            }
-            this->_stagingTexture = nullptr;
-        }
-
-        if (this->_stagingTexture == nullptr) {
-            D3D11_TEXTURE2D_DESC desc;
-            texture->GetDesc(&desc);
-            desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-            desc.Usage = D3D11_USAGE_STAGING;
-            desc.BindFlags = 0;
-            desc.MiscFlags = 0;
-            auto hr = this->_device->CreateTexture2D(&desc, nullptr,
-                &this->_stagingTexture);
-            if (FAILED(hr)) {
-                UE_LOG(DesktopDuplicatorLog,
-                    Error,
-                    TEXT("Creating a staging texture for desktop duplication ")
-                    TEXT("failed with error 0x%x."), hr);
-                assert(this->_stagingTexture == nullptr);
-                retval = false;
-            }
-        }
-
+        assert(this->_stagingTexture != nullptr);
         this->_context->CopyResource(this->_stagingTexture, texture);
 
-        ENQUEUE_RENDER_COMMAND(UpdateRTCommand)(
-            [this, texture](FRHICommandListImmediate& cmdList) {
-                D3D11_MAPPED_SUBRESOURCE data { };
-                auto hr = this->_context->Map(this->_stagingTexture,
-                    0, D3D11_MAP_READ, 0, &data);
-                if (FAILED(hr)) {
-                    UE_LOG(DesktopDuplicatorLog,
-                        Error,
-                        TEXT("Mapping the staging texture for desktop ")
-                        TEXT("duplication failed with error 0x%x."), hr);
-                    return;
-                }
+        if (this->_stagingProjection != nullptr) {
+            // We have a copy of the staging buffer on the UE device, so it is
+            // possible to perform the update solely on the GPU.
+            assert(this->AllowGpuCopy);
 
-                FUpdateTextureRegion2D region(0, 0, 0, 0,
-                    this->Target->GetSurfaceWidth(),
-                    this->Target->GetSurfaceHeight());
+            ENQUEUE_RENDER_COMMAND(CopyRTCommand)(
+                [this](FRHICommandListImmediate& cmdList) {
+                    assert(texture != nullptr);
+                    auto rhi = ::GetID3D11DynamicRHI();
+                    ID3D11Texture2D *staging = nullptr;
+                    this->_stagingProjection->QueryInterface(
+                        ::IID_ID3D11Texture2D,
+                        reinterpret_cast<void **>(&staging));
+                    auto src = rhi->RHICreateTexture2DFromResource(
+                        EPixelFormat::PF_B8G8R8A8,
+                        ETextureCreateFlags::None,
+                        FClearValueBinding::None,
+                        staging);
+                    src->SetName(TEXT("Desktop source"));
+                    auto dst = this->Target
+                        ->GetRenderTargetResource()
+                        ->GetRenderTargetTexture();
 
-                auto res = this->Target->GetRenderTargetResource();
-                GDynamicRHI->RHIUpdateTexture2D(
-                    cmdList,
-                    res->GetRenderTargetTexture(),
-                    0,
-                    region,
-                    data.RowPitch,
-                    static_cast<const uint8 *>(data.pData));
+                    FRHIRenderPassInfo rpi(dst,
+                        ERenderTargetActions::Load_Store);
+                    //cmdList.BeginRenderPass(rpi, TEXT("CopyRT"));
+                    cmdList.CopyTexture(src, dst, FRHICopyTextureInfo());
+                    //cmdList.EndRenderPass();
 
-                this->_context->Unmap(this->_stagingTexture, 0);
-                this->_busy.AtomicSet(false);
-            });
-    }
+                    src.SafeRelease();
+                    staging->Release();
+    //                this->_duplication->ReleaseFrame();
+                    this->_busy.AtomicSet(false);
+                });
+
+        } else {
+            // We must download the data and populate the target from the CPU.
+            ENQUEUE_RENDER_COMMAND(UpdateRTCommand)(
+                [this, texture](FRHICommandListImmediate& cmdList) {
+                    D3D11_MAPPED_SUBRESOURCE data { };
+                    auto hr = this->_context->Map(this->_stagingTexture,
+                        0, D3D11_MAP_READ, 0, &data);
+                    if (FAILED(hr)) {
+                        UE_LOG(DesktopDuplicatorLog,
+                            Error,
+                            TEXT("Mapping the staging texture for desktop ")
+                            TEXT("duplication failed with error 0x%x."), hr);
+                        return;
+                    }
+
+                    FUpdateTextureRegion2D region(0, 0, 0, 0,
+                        this->Target->GetSurfaceWidth(),
+                        this->Target->GetSurfaceHeight());
+
+                    auto res = this->Target->GetRenderTargetResource();
+                    GDynamicRHI->RHIUpdateTexture2D(
+                        cmdList,
+                        res->GetRenderTargetTexture(),
+                        0,
+                        region,
+                        data.RowPitch,
+                        static_cast<const uint8 *>(data.pData));
+
+                    this->_context->Unmap(this->_stagingTexture, 0);
+                    this->_busy.AtomicSet(false);
+                });
+        } /* if (this->_stagingProjection != nullptr) */
+    } /* if (retval) */
 
     if (!retval) {
         UE_LOG(DesktopDuplicatorLog,
